@@ -1,0 +1,65 @@
+HINANA STUDIO PHOTO PROPRIETARY LICENSE
+
+Copyright © 2026 비나래. All rights reserved.
+
+라이선스 요약
+
+HINANA STUDIO PHOTO는 오픈소스 소프트웨어가 아닙니다. 공식 바이너리는
+무료로 사용할 수 있고, 공식 앱으로 만든 결과물의 권리는 사용자에게
+있습니다. 다만 소스 코드의 수정·재배포·리브랜딩, 바이너리 재배포 또는
+별도 서비스 제공 권한은 부여되지 않습니다.
+
+1. Official binary use
+
+Official, unmodified binary releases of HINANA STUDIO PHOTO may be downloaded
+and used free of charge for lawful personal or commercial image production and
+editing. The copyright holder claims no rights over images, media, or project
+output created or edited by users with an official binary release.
+
+2. Proprietary source code
+
+HINANA STUDIO PHOTO and its source code are proprietary software. Publication
+of the source code in a public repository does not make the software open
+source and does not grant a license to copy, modify, distribute, sublicense,
+sell, relicense, deploy, rebrand, or create derivative works from the source
+code.
+
+3. No redistribution or service rights
+
+No permission is granted to redistribute the binaries, bundle them with
+another product, remove or alter attribution, use the HINANA STUDIO PHOTO name,
+icon, interface, or branding for another product, or offer the software or a
+modified version as a hosted or commercial service without prior written
+permission from the copyright holder.
+
+4. User content and projects
+
+Project files and image media created or imported by users remain the property
+of their respective owners. Users are solely responsible for ensuring that
+they have the rights and permissions required to edit, export, share, or
+distribute such content.
+
+5. GitHub forks
+
+Forking through GitHub is permitted only as provided by GitHub's platform
+features and the GitHub Terms of Service. A fork does not grant any copyright
+license to use, modify, publish, distribute, deploy, rebrand, sublicense, or
+create derivative works from the software, except solely to the extent
+required by GitHub's Terms of Service.
+
+6. Third-party components
+
+Third-party libraries, tools, fonts, media, and other dependencies are subject
+to their respective licenses and are not relicensed by this notice. This
+includes Electron, React, Lucide, Vite, TypeScript, and their dependencies.
+
+7. Disclaimer
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING
+FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OF THE SOFTWARE.
+
+For permissions not granted above, contact the copyright holder:
+https://github.com/murikubo
