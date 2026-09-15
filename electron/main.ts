@@ -1,8 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type MenuItemConstructorOptions } from "electron";
 import { promises as fs } from "fs";
 import path from "path";
-import { promisify } from "util";
-import { gzip, gunzip } from "zlib";
+import { readProject, writeProject } from "./projectFile";
 
 app.setName("HINANA STUDIO PHOTO");
 app.setAppUserModelId("studio.hinana.photo");
@@ -10,16 +9,10 @@ app.setAppUserModelId("studio.hinana.photo");
 let mainWindow: BrowserWindow | null = null;
 let currentProjectPath: string | null = null;
 let pendingProjectPath = process.argv.find((argument) => /\.hinanaphoto$/i.test(argument)) || null;
-const gzipAsync = promisify(gzip);
-const gunzipAsync = promisify(gunzip);
 const send = (action: string) => mainWindow?.webContents.send("menu:action", action);
 const readProjectFile = async (filePath: string) => {
-  currentProjectPath = filePath;
-  const raw = await fs.readFile(filePath);
-  let data: Buffer;
-  try { data = await gunzipAsync(raw); }
-  catch { data = raw; }
-  return { path: filePath, data: data.toString("utf8") };
+  const data = await readProject(filePath);
+  return { path: filePath, data };
 };
 
 const deliverPendingProject = async () => {
@@ -88,6 +81,15 @@ const createWindow = () => {
   if (app.isPackaged) void mainWindow.loadFile(path.join(app.getAppPath(), "dist", "index.html"));
   else void mainWindow.loadURL("http://localhost:5173");
   mainWindow.on("closed", () => { mainWindow = null; });
+  mainWindow.webContents.on("will-prevent-unload", (event) => {
+    const choice = dialog.showMessageBoxSync(mainWindow!, {
+      type: "warning", title: "저장하지 않은 변경 사항",
+      message: "저장하지 않은 편집 내용이 있습니다.",
+      detail: "계속 편집을 선택한 뒤 프로젝트를 저장할 수 있습니다.",
+      buttons: ["계속 편집", "저장하지 않고 종료"], defaultId: 0, cancelId: 0,
+    });
+    if (choice === 1) event.preventDefault();
+  });
 };
 
 ipcMain.handle("image:select", async () => {
@@ -110,18 +112,24 @@ ipcMain.handle("project:new", () => {
 });
 
 ipcMain.handle("project:save", async (_event, data: string, saveAs = false) => {
-  if (!currentProjectPath || saveAs) {
+  let target = currentProjectPath;
+  if (!target || saveAs) {
     const result = await dialog.showSaveDialog({
       title: saveAs ? "프로젝트를 다른 이름으로 저장" : "프로젝트 저장",
       defaultPath: currentProjectPath || "새 프로젝트.hinanaphoto",
       filters: [{ name: "HINANA STUDIO PHOTO 프로젝트", extensions: ["hinanaphoto"] }],
     });
     if (result.canceled || !result.filePath) return null;
-    currentProjectPath = /\.hinanaphoto$/i.test(result.filePath) ? result.filePath : `${result.filePath}.hinanaphoto`;
+    target = /\.hinanaphoto$/i.test(result.filePath) ? result.filePath : `${result.filePath}.hinanaphoto`;
   }
-  const compressed = await gzipAsync(Buffer.from(data, "utf8"), { level: 9 });
-  await fs.writeFile(currentProjectPath, compressed);
+  await writeProject(target!, data);
+  currentProjectPath = target;
   return currentProjectPath;
+});
+
+ipcMain.handle("project:adopt", (_event, filePath: string) => {
+  if (typeof filePath !== "string" || !/\.hinanaphoto$/i.test(filePath)) throw new Error("잘못된 프로젝트 경로입니다.");
+  currentProjectPath = filePath;
 });
 
 ipcMain.handle("project:open", async () => {

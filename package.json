@@ -68,6 +68,7 @@
     }
   },
   "scripts": {
+    "test": "npm run build:electron && node --experimental-strip-types --test tests/*.test.mjs",
     "dev": "npm run build:electron && concurrently -k \"vite\" \"wait-on http://localhost:5173 && node scripts/launch-electron.cjs\"",
     "build:electron": "tsc -p electron/tsconfig.json",
     "build": "npm run license:rtf && tsc && vite build && npm run build:electron",

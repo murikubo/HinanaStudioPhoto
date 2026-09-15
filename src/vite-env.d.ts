@@ -5,6 +5,7 @@ interface Window {
     platform: string;
     selectImage: () => Promise<{ name: string; data: ArrayBuffer } | null>;
     newProject: () => Promise<boolean>;
+    adoptProject: (filePath: string) => Promise<void>;
     saveProject: (data: string, saveAs?: boolean) => Promise<string | null>;
     openProject: () => Promise<{ path: string; data: string } | null>;
     onProjectFile: (callback: (project: { path: string; data: string }) => void) => () => void;

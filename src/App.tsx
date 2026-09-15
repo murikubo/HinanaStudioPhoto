@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { transformLayer, cropLayer } from "./editorGeometry";
 import {
   Blend, Brush, ChevronDown, ChevronUp, Download, FlipHorizontal2, FlipVertical2,
   AlignCenter, AlignLeft, AlignRight, Bold, Copy, Eye, EyeOff, FileArchive, FolderOpen, Image as ImageIcon, Info, Layers3,
-  MousePointer2, PanelRight, Plus, Redo2, RotateCcw, RotateCw,
+  Hand, MousePointer2, PanelRight, Plus, Redo2, RotateCcw, RotateCw,
   Save, SlidersHorizontal, TextCursorInput, Trash2, Undo2, Upload, X, ZoomIn, ZoomOut,
 } from "lucide-react";
 import photoIconUrl from "../photoicon.png";
 import packageInfo from "../package.json";
 
-type Tool = "move" | "mosaic" | "brush" | "crop" | "text";
+type Tool = "move" | "mosaic" | "brush" | "crop" | "text" | "hand";
 type AdjustmentKey = "brightness" | "contrast" | "saturation" | "temperature" | "hue";
 type Adjustments = Record<AdjustmentKey, number>;
 type LayerMeta = {
@@ -74,6 +75,15 @@ export default function App() {
   const sourceRef = useRef<HTMLCanvasElement>(document.createElement("canvas"));
   const layerCanvasesRef = useRef(new Map<string, HTMLCanvasElement>());
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const thumbnailRef = useRef<HTMLCanvasElement>(null);
+  const [viewportSize, setViewportSize] = useState({ width: 800, height: 600 });
+  const [fitView, setFitView] = useState(true);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
+  const restoringRef = useRef(false);
+  const [exportQuality, setExportQuality] = useState(92);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const layerFileInputRef = useRef<HTMLInputElement>(null);
   const projectFileInputRef = useRef<HTMLInputElement>(null);
@@ -112,6 +122,26 @@ export default function App() {
   const [showLicense, setShowLicense] = useState(false);
   const [projectPath, setProjectPath] = useState<string | null>(null);
 
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(([entry]) => setViewportSize({ width: entry.contentRect.width, height: entry.contentRect.height }));
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    if (loaded) setDirty(true);
+  }, [layers, adjustments, revision]);
+  useEffect(() => {
+    const listener = (event: BeforeUnloadEvent) => { if (dirty) { event.preventDefault(); event.returnValue = ""; } };
+    window.addEventListener("beforeunload", listener);
+    return () => window.removeEventListener("beforeunload", listener);
+  }, [dirty]);
+  const fitZoom = Math.min(1, Math.max(0.01, (viewportSize.width - 80) / sourceRef.current.width), Math.max(0.01, (viewportSize.height - 80) / sourceRef.current.height));
+  const viewZoom = fitView ? fitZoom : zoom;
+  const fitCanvas = () => { setFitView(true); setPan({ x: 0, y: 0 }); };
+  const changeZoom = (delta: number) => { setZoom(clamp(viewZoom + delta, .05, 8)); setFitView(false); };
+
   useEffect(() => { adjustmentsRef.current = adjustments; }, [adjustments]);
 
   const render = useCallback(() => {
@@ -135,19 +165,21 @@ export default function App() {
       ctx.translate(source.width / 2 + layer.x, source.height / 2 + layer.y);
       ctx.rotate((layer.rotation * Math.PI) / 180);
       ctx.scale(layer.scaleX / 100, layer.scaleY / 100);
-      ctx.drawImage(layerCanvas, -source.width / 2, -source.height / 2);
+      ctx.drawImage(layerCanvas, -layerCanvas.width / 2, -layerCanvas.height / 2);
       ctx.restore();
     }
     ctx.globalAlpha = 1;
     ctx.filter = "none";
     if (a.temperature !== 0) {
-      ctx.globalCompositeOperation = "soft-light";
+      ctx.globalCompositeOperation = "source-atop";
       ctx.globalAlpha = Math.abs(a.temperature) / 180;
       ctx.fillStyle = a.temperature > 0 ? "#ff8a35" : "#398cff";
       ctx.fillRect(0, 0, output.width, output.height);
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
     }
+    const preview = thumbnailRef.current;
+    if (preview) { const pc = preview.getContext("2d")!; pc.clearRect(0, 0, preview.width, preview.height); pc.drawImage(output, 0, 0, preview.width, preview.height); }
   }, [layers]);
 
   useEffect(() => { render(); }, [adjustments, revision, render]);
@@ -163,7 +195,8 @@ export default function App() {
   });
 
   const pushUndo = () => {
-    if (!sourceRef.current.width) return;
+    if (!loaded || restoringRef.current) return;
+    setDirty(true);
     undoRef.current.push(currentSnapshot());
     if (undoRef.current.length > 30) undoRef.current.shift();
     redoRef.current = [];
@@ -172,17 +205,16 @@ export default function App() {
   const restoreSnapshot = async (snapshot: Snapshot) => {
     const image = await dataUrlToImage(snapshot.image);
     const source = sourceRef.current;
-    source.width = image.naturalWidth;
-    source.height = image.naturalHeight;
-    source.getContext("2d")!.drawImage(image, 0, 0);
     const restoredLayers: LayerMeta[] = [];
     const restoredCanvases = new Map<string, HTMLCanvasElement>();
     for (const saved of snapshot.layers || []) {
       const layerCanvas = document.createElement("canvas");
-      layerCanvas.width = source.width;
-      layerCanvas.height = source.height;
+      layerCanvas.width = image.naturalWidth;
+      layerCanvas.height = image.naturalHeight;
       if (saved.image) {
         const layerImage = await dataUrlToImage(saved.image);
+        layerCanvas.width = layerImage.naturalWidth;
+        layerCanvas.height = layerImage.naturalHeight;
         layerCanvas.getContext("2d")!.drawImage(layerImage, 0, 0);
       }
       restoredCanvases.set(saved.id, layerCanvas);
@@ -198,8 +230,8 @@ export default function App() {
         scaleX: saved.scaleX || legacyScale,
         scaleY: saved.scaleY || legacyScale,
         rotation: saved.rotation || 0,
-        contentWidth: saved.contentWidth || source.width,
-        contentHeight: saved.contentHeight || source.height,
+        contentWidth: saved.contentWidth || layerCanvas.width,
+        contentHeight: saved.contentHeight || layerCanvas.height,
         text: saved.text,
         fontSize: saved.fontSize,
         fontFamily: saved.fontFamily,
@@ -208,6 +240,9 @@ export default function App() {
         textAlign: saved.textAlign,
       });
     }
+    source.width = image.naturalWidth;
+    source.height = image.naturalHeight;
+    source.getContext("2d")!.drawImage(image, 0, 0);
     layerCanvasesRef.current = restoredCanvases;
     setLayers(restoredLayers);
     setSelectedLayerId(snapshot.selectedLayerId || "background");
@@ -226,11 +261,13 @@ export default function App() {
   } satisfies PhotoProject);
 
   const restoreProject = async (raw: string, path: string | null = null) => {
+    if (dirty && !window.confirm("저장하지 않은 변경사항을 닫고 프로젝트를 여시겠습니까?")) return;
     const project = JSON.parse(raw) as PhotoProject;
     if (project.application !== "HINANA STUDIO PHOTO" || project.formatVersion !== 1 || !project.snapshot?.image) {
       throw new Error("지원하지 않거나 손상된 HINANA PHOTO 프로젝트입니다.");
     }
     await restoreSnapshot(project.snapshot);
+    if (path && window.hinanaPhoto) await window.hinanaPhoto.adoptProject(path);
     originalRef.current = project.original || project.snapshot.image;
     setFileName(project.fileName || "복원된 프로젝트");
     setLoaded(true);
@@ -241,16 +278,21 @@ export default function App() {
     undoRef.current = [];
     redoRef.current = [];
     setStatus(`프로젝트를 불러왔습니다${path ? ` · ${path}` : ""}`);
+    fitCanvas();
+    window.setTimeout(() => setDirty(false), 0);
   };
 
   const saveProject = async (saveAs = false) => {
-    if (!loaded) return;
+    if (!loaded || savingRef.current) return;
+    savingRef.current = true; setSaving(true);
+    try {
     const data = serializeProject();
     if (window.hinanaPhoto) {
       const saved = await window.hinanaPhoto.saveProject(data, saveAs);
       if (saved) {
         setProjectPath(saved);
         setStatus(`프로젝트 저장 완료 · ${saved}`);
+        setDirty(false);
       }
       return;
     }
@@ -261,6 +303,9 @@ export default function App() {
     link.click();
     URL.revokeObjectURL(link.href);
     setStatus("프로젝트를 저장했습니다");
+    setDirty(false);
+    } catch (error) { setStatus(`저장 실패: ${error instanceof Error ? error.message : error}`); }
+    finally { savingRef.current = false; setSaving(false); }
   };
 
   const openProject = async () => {
@@ -275,22 +320,27 @@ export default function App() {
   };
 
   const undo = async () => {
+    if (restoringRef.current) return;
     const snapshot = undoRef.current.pop();
     if (!snapshot) return;
     redoRef.current.push(currentSnapshot());
-    await restoreSnapshot(snapshot);
+    restoringRef.current = true;
+    try { await restoreSnapshot(snapshot); } finally { restoringRef.current = false; }
     setStatus("실행 취소했습니다");
   };
 
   const redo = async () => {
+    if (restoringRef.current) return;
     const snapshot = redoRef.current.pop();
     if (!snapshot) return;
     undoRef.current.push(currentSnapshot());
-    await restoreSnapshot(snapshot);
+    restoringRef.current = true;
+    try { await restoreSnapshot(snapshot); } finally { restoringRef.current = false; }
     setStatus("다시 실행했습니다");
   };
 
   const loadBlob = async (blob: Blob, name: string) => {
+    if (dirty && !window.confirm("저장하지 않은 변경사항을 닫고 이미지를 여시겠습니까?")) return;
     const url = URL.createObjectURL(blob);
     try {
       const image = await dataUrlToImage(url);
@@ -310,11 +360,12 @@ export default function App() {
       adjustmentsRef.current = DEFAULT_ADJUSTMENTS;
       setFileName(name);
       setLoaded(true);
+      fitCanvas();
       setZoom(1);
       setPan({ x: 0, y: 0 });
       setRevision((value) => value + 1);
       setStatus(`${image.naturalWidth} × ${image.naturalHeight}px · ${name}`);
-    } finally {
+    } catch (error) { setStatus(`이미지를 열 수 없습니다: ${error instanceof Error ? error.message : error}`); } finally {
       URL.revokeObjectURL(url);
     }
   };
@@ -329,8 +380,6 @@ export default function App() {
   const transformImage = (kind: "cw" | "ccw" | "flipH" | "flipV") => {
     const old = sourceRef.current;
     if (!old.width) return;
-    const originalWidth = old.width;
-    const originalHeight = old.height;
     pushUndo();
     const next = document.createElement("canvas");
     const rotate = kind === "cw" || kind === "ccw";
@@ -346,30 +395,8 @@ export default function App() {
     old.width = next.width;
     old.height = next.height;
     old.getContext("2d")!.drawImage(next, 0, 0);
-    for (const layer of layers) {
-      const oldLayer = layerCanvasesRef.current.get(layer.id);
-      if (!oldLayer) continue;
-      const flattened = document.createElement("canvas");
-      flattened.width = originalWidth;
-      flattened.height = originalHeight;
-      const flatContext = flattened.getContext("2d")!;
-      flatContext.translate(originalWidth / 2 + layer.x, originalHeight / 2 + layer.y);
-      flatContext.rotate((layer.rotation * Math.PI) / 180);
-      flatContext.scale(layer.scaleX / 100, layer.scaleY / 100);
-      flatContext.drawImage(oldLayer, -originalWidth / 2, -originalHeight / 2);
-      const nextLayer = document.createElement("canvas");
-      nextLayer.width = next.width;
-      nextLayer.height = next.height;
-      const layerContext = nextLayer.getContext("2d")!;
-      layerContext.translate(nextLayer.width / 2, nextLayer.height / 2);
-      if (kind === "cw") layerContext.rotate(Math.PI / 2);
-      if (kind === "ccw") layerContext.rotate(-Math.PI / 2);
-      if (kind === "flipH") layerContext.scale(-1, 1);
-      if (kind === "flipV") layerContext.scale(1, -1);
-      layerContext.drawImage(flattened, -flattened.width / 2, -flattened.height / 2);
-      layerCanvasesRef.current.set(layer.id, nextLayer);
-    }
-    setLayers((current) => current.map((layer) => ({ ...layer, x: 0, y: 0, scaleX: 100, scaleY: 100, rotation: 0, contentWidth: next.width, contentHeight: next.height })));
+    // Transform layer coordinates without rasterizing their pixels or text.
+    setLayers((current) => current.map((layer) => transformLayer(layer, kind)));
     setRevision((value) => value + 1);
   };
 
@@ -391,18 +418,19 @@ export default function App() {
 
   const pointForActiveLayer = (point: { x: number; y: number; scale: number }) => {
     const layer = layers.find((item) => item.id === selectedLayerId);
-    if (!layer) return point;
+    if (!layer) return { ...point, scale: 1 };
     const centerX = sourceRef.current.width / 2;
     const centerY = sourceRef.current.height / 2;
+    const target = activePaintCanvas();
     const radians = (-layer.rotation * Math.PI) / 180;
     const translatedX = point.x - centerX - layer.x;
     const translatedY = point.y - centerY - layer.y;
     const factorX = 100 / layer.scaleX;
     const factorY = 100 / layer.scaleY;
     return {
-      x: (translatedX * Math.cos(radians) - translatedY * Math.sin(radians)) * factorX + centerX,
-      y: (translatedX * Math.sin(radians) + translatedY * Math.cos(radians)) * factorY + centerY,
-      scale: point.scale * ((factorX + factorY) / 2),
+      x: (translatedX * Math.cos(radians) - translatedY * Math.sin(radians)) * factorX + target.width / 2,
+      y: (translatedX * Math.sin(radians) + translatedY * Math.cos(radians)) * factorY + target.height / 2,
+      scale: (Math.abs(factorX) + Math.abs(factorY)) / 2,
     };
   };
 
@@ -429,44 +457,38 @@ export default function App() {
   };
 
   const applyMosaic = (clientX: number, clientY: number) => {
-    const output = canvasRef.current;
-    const source = sourceRef.current;
-    if (!output || !source.width) return;
-    const rect = output.getBoundingClientRect();
-    const x = (clientX - rect.left) * (source.width / rect.width);
-    const y = (clientY - rect.top) * (source.height / rect.height);
-    const scale = source.width / rect.width;
-    const radius = (brushSize * scale) / 2;
-    const block = Math.max(2, Math.round(mosaicSize * scale));
+    const raw = canvasPoint(clientX, clientY);
+    if (!raw) return;
+    const point = pointForActiveLayer(raw);
+    const source = activePaintCanvas();
+    const radius = brushSize / 2;
+    const block = Math.max(2, Math.round(mosaicSize));
     const ctx = source.getContext("2d")!;
+    const left = Math.max(0, Math.floor((point.x - radius) / block) * block);
+    const top = Math.max(0, Math.floor((point.y - radius) / block) * block);
+    const right = Math.min(source.width, Math.ceil((point.x + radius) / block) * block);
+    const bottom = Math.min(source.height, Math.ceil((point.y + radius) / block) * block);
+    if (right <= left || bottom <= top) return;
     const copy = document.createElement("canvas");
-    copy.width = source.width;
-    copy.height = source.height;
-    copy.getContext("2d")!.drawImage(source, 0, 0);
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.clip();
-    const startX = Math.floor((x - radius) / block) * block;
-    const startY = Math.floor((y - radius) / block) * block;
-    for (let py = startY; py < y + radius; py += block) {
-      for (let px = startX; px < x + radius; px += block) {
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(copy, px, py, block, block, px, py, block, block);
-        const sample = copy.getContext("2d")!.getImageData(
-          Math.max(0, Math.min(source.width - 1, px + Math.floor(block / 2))),
-          Math.max(0, Math.min(source.height - 1, py + Math.floor(block / 2))), 1, 1,
-        ).data;
-        ctx.fillStyle = `rgba(${sample[0]},${sample[1]},${sample[2]},${sample[3] / 255})`;
-        ctx.fillRect(px, py, block, block);
-      }
-    }
+    copy.width = right - left; copy.height = bottom - top;
+    copy.getContext("2d")!.drawImage(source, left, top, copy.width, copy.height, 0, 0, copy.width, copy.height);
+    const tiny = document.createElement("canvas");
+    tiny.width = Math.max(1, Math.ceil(copy.width / block)); tiny.height = Math.max(1, Math.ceil(copy.height / block));
+    tiny.getContext("2d")!.drawImage(copy, 0, 0, tiny.width, tiny.height);
+    ctx.save(); ctx.beginPath(); ctx.arc(point.x, point.y, radius, 0, Math.PI * 2); ctx.clip();
+    ctx.clearRect(left, top, copy.width, copy.height);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(tiny, left, top, copy.width, copy.height);
     ctx.restore();
-    setRevision((value) => value + 1);
+    setRevision(value => value + 1);
   };
 
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!loaded) return;
+    const selected = layers.find(l => l.id === selectedLayerId);
+    if ((tool === "brush" || tool === "mosaic") && selected && (!selected.visible || selected.kind === "text")) {
+      setStatus("브러시·모자이크는 표시 중인 픽셀 레이어를 선택해 사용하세요."); return;
+    }
     if (tool === "crop") return;
     if (tool === "text") {
       addTextLayerAt(event.clientX, event.clientY);
@@ -564,26 +586,15 @@ export default function App() {
     source.width = width;
     source.height = height;
     source.getContext("2d")!.drawImage(croppedSource, 0, 0);
-    for (const layer of layers) {
-      const layerCanvas = layerCanvasesRef.current.get(layer.id);
-      if (!layerCanvas) continue;
-      const flattened = document.createElement("canvas");
-      flattened.width = originalWidth;
-      flattened.height = originalHeight;
-      const context = flattened.getContext("2d")!;
-      context.translate(originalWidth / 2 + layer.x, originalHeight / 2 + layer.y);
-      context.rotate((layer.rotation * Math.PI) / 180);
-      context.scale(layer.scaleX / 100, layer.scaleY / 100);
-      context.drawImage(layerCanvas, -originalWidth / 2, -originalHeight / 2);
-      layerCanvasesRef.current.set(layer.id, cropCanvas(flattened));
-    }
-    setLayers((current) => current.map((layer) => ({ ...layer, x: 0, y: 0, scaleX: 100, scaleY: 100, rotation: 0, contentWidth: width, contentHeight: height })));
+    // A crop changes the document origin; layer pixels remain intact.
+    setLayers((current) => current.map((layer) => cropLayer(layer, originalWidth, originalHeight, x, y, width, height)));
     setCropRect({ x: 10, y: 10, width: 80, height: 80 });
     setTool("move");
     setZoom(1);
     setPan({ x: 0, y: 0 });
     setRevision((value) => value + 1);
     setStatus(`${width} × ${height}px로 잘랐습니다`);
+    fitCanvas();
   };
 
   const cropPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
@@ -679,8 +690,10 @@ export default function App() {
       const deltaY = event.clientY - drag.centerY;
       const localX = deltaX * Math.cos(radians) + deltaY * Math.sin(radians);
       const localY = -deltaX * Math.sin(radians) + deltaY * Math.cos(radians);
-      const scaleX = clamp(drag.startScaleX * (Math.abs(localX) / drag.startDistanceX), 5, 500);
-      const scaleY = clamp(drag.startScaleY * (Math.abs(localY) / drag.startDistanceY), 5, 500);
+      const ratioX = Math.abs(localX) / drag.startDistanceX;
+      const ratioY = event.shiftKey ? ratioX : Math.abs(localY) / drag.startDistanceY;
+      const scaleX = Math.sign(drag.startScaleX) * clamp(Math.abs(drag.startScaleX) * ratioX, 5, 500);
+      const scaleY = Math.sign(drag.startScaleY) * clamp(Math.abs(drag.startScaleY) * ratioY, 5, 500);
       setLayers((current) => current.map((layer) => layer.id === drag.id ? { ...layer, scaleX, scaleY } : layer));
     } else {
       const angle = Math.atan2(event.clientY - drag.centerY, event.clientX - drag.centerX);
@@ -707,7 +720,7 @@ export default function App() {
     const fontSize = layer.fontSize || 64;
     const fontFamily = layer.fontFamily || "Inter";
     const fontWeight = layer.fontWeight || "400";
-    const lines = (layer.text || "텍스트를 입력하세요").split("\n");
+    const lines = (layer.text ?? "텍스트를 입력하세요").split("\n");
     const lineHeight = fontSize * 1.25;
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.font = `${fontWeight} ${fontSize}px "${fontFamily}"`;
@@ -715,6 +728,11 @@ export default function App() {
     context.fillStyle = layer.textColor || "#ffffff";
     const maxWidth = Math.max(20, ...lines.map((line) => context.measureText(line || " ").width));
     const totalHeight = Math.max(lineHeight, lines.length * lineHeight);
+    canvas.width = Math.min(16384, Math.ceil(maxWidth + fontSize));
+    canvas.height = Math.min(16384, Math.ceil(totalHeight + fontSize));
+    context.font = `${fontWeight} ${fontSize}px "${fontFamily}"`;
+    context.textBaseline = "middle";
+    context.fillStyle = layer.textColor || "#ffffff";
     const align = layer.textAlign || "center";
     context.textAlign = align;
     const centerX = canvas.width / 2;
@@ -784,12 +802,12 @@ export default function App() {
       pushUndo();
       const id = `layer-${Date.now().toString(36)}`;
       const canvas = document.createElement("canvas");
-      canvas.width = sourceRef.current.width;
-      canvas.height = sourceRef.current.height;
-      const fit = Math.min(1, (canvas.width * 0.82) / image.naturalWidth, (canvas.height * 0.82) / image.naturalHeight);
-      const width = image.naturalWidth * fit;
-      const height = image.naturalHeight * fit;
-      canvas.getContext("2d")!.drawImage(image, (canvas.width - width) / 2, (canvas.height - height) / 2, width, height);
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const fit = Math.min(1, (sourceRef.current.width * 0.82) / canvas.width, (sourceRef.current.height * 0.82) / canvas.height);
+      const width = canvas.width;
+      const height = canvas.height;
+      canvas.getContext("2d")!.drawImage(image, 0, 0);
       layerCanvasesRef.current.set(id, canvas);
       setLayers((current) => [...current, {
         id,
@@ -799,8 +817,8 @@ export default function App() {
         opacity: 100,
         x: 0,
         y: 0,
-        scaleX: 100,
-        scaleY: 100,
+        scaleX: fit * 100,
+        scaleY: fit * 100,
         rotation: 0,
         contentWidth: width,
         contentHeight: height,
@@ -851,10 +869,11 @@ export default function App() {
 
   const updateLayer = (id: string, patch: Partial<LayerMeta>, saveHistory = false) => {
     if (saveHistory) pushUndo();
-    setLayers((current) => current.map((layer) => {
+    const textChanged = ["text", "fontSize", "fontFamily", "fontWeight", "textColor", "textAlign"].some(key => key in patch);
+    setLayers(layers.map((layer) => {
       if (layer.id !== id) return layer;
       const next = { ...layer, ...patch };
-      return next.kind === "text" ? drawTextLayer(next) : next;
+      return next.kind === "text" && textChanged ? drawTextLayer(next) : next;
     }));
   };
 
@@ -876,7 +895,12 @@ export default function App() {
     const canvas = canvasRef.current;
     if (!canvas || !loaded) return;
     const mime = exportFormat === "jpeg" ? "image/jpeg" : "image/png";
-    const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, mime, 0.92));
+    render();
+    const output = document.createElement("canvas"); output.width = canvas.width; output.height = canvas.height;
+    const context = output.getContext("2d")!;
+    if (exportFormat === "jpeg") { context.fillStyle = "#ffffff"; context.fillRect(0, 0, output.width, output.height); }
+    context.drawImage(canvas, 0, 0);
+    const blob = await new Promise<Blob | null>((resolve) => output.toBlob(resolve, mime, exportQuality / 100));
     if (!blob) return;
     const bytes = await blob.arrayBuffer();
     if (window.hinanaPhoto) {
@@ -895,19 +919,23 @@ export default function App() {
 
   useEffect(() => {
     const cleanup = window.hinanaPhoto?.onMenuAction((action) => {
+      if (saving || restoringRef.current) return;
+      if ((action === "undo" || action === "redo") && document.activeElement?.matches("input,textarea,[contenteditable=true]")) {
+        document.execCommand(action); return;
+      }
       if (action === "open") void openImage();
       if (action === "importLayer") void importImageLayer();
       if (action === "openProject") void openProject();
       if (action === "saveProject") void saveProject(false);
       if (action === "saveProjectAs") void saveProject(true);
-      if (action === "export") setShowExport(true);
+      if (action === "export" && loaded) setShowExport(true);
       if (action === "undo") void undo();
       if (action === "redo") void redo();
       if (action === "reset") void resetAll();
       if (action === "about") setShowAbout(true);
-      if (action === "zoomIn") setZoom((z) => Math.min(4, z + 0.1));
-      if (action === "zoomOut") setZoom((z) => Math.max(0.1, z - 0.1));
-      if (action === "fit") { setZoom(1); setPan({ x: 0, y: 0 }); }
+      if (action === "zoomIn") changeZoom(0.1);
+      if (action === "zoomOut") changeZoom(-0.1);
+      if (action === "fit") fitCanvas();
     });
     const projectCleanup = window.hinanaPhoto?.onProjectFile((project) => {
       void restoreProject(project.data, project.path).catch((error) =>
@@ -919,20 +947,36 @@ export default function App() {
       window.hinanaPhoto?.rendererReady();
     }
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLInputElement) return;
-      if (event.key.toLowerCase() === "m") setTool("mosaic");
-      if (event.key.toLowerCase() === "v") setTool("move");
-      if (event.key.toLowerCase() === "b" && loaded) setTool("brush");
-      if (event.key.toLowerCase() === "c" && loaded) setTool("crop");
-      if (event.key.toLowerCase() === "t" && loaded) setTool("text");
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "o") { event.preventDefault(); void openImage(); }
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void saveProject(event.shiftKey); }
+      if (event.isComposing || (event.target instanceof HTMLElement && event.target.closest("input,textarea,select,[contenteditable=true]"))) return;
+      if (event.key === "Escape") { setShowExport(false); setShowAbout(false); setShowLicense(false); setTool("move"); return; }
+      if (showAbout || showLicense || showExport || saving) return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey || event.metaKey) {
+        // Electron owns native menu accelerators; browser preview needs its own.
+        if (!window.hinanaPhoto) {
+          if (key === "s") { event.preventDefault(); void saveProject(event.shiftKey); }
+          if (key === "o") { event.preventDefault(); if (event.altKey) void openProject(); else if (event.shiftKey) void importImageLayer(); else void openImage(); }
+          if (key === "z") { event.preventDefault(); if (event.shiftKey) void redo(); else void undo(); }
+          if (key === "e") { event.preventDefault(); if (loaded) setShowExport(true); }
+        }
+        return;
+      }
+      if (key === "h") setTool("hand");
+      if (key === "v") setTool("move");
+      if (loaded) {
+        if (key === "m") setTool("mosaic");
+        if (key === "b") setTool("brush");
+        if (key === "c") setTool("crop");
+        if (key === "t") setTool("text");
+        if (event.key === "Enter" && tool === "crop") applyCrop();
+        if (event.key === "Delete" && selectedLayerId !== "background") deleteLayer();
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => { cleanup?.(); projectCleanup?.(); window.removeEventListener("keydown", onKey); };
   });
 
-  const displayPercent = Math.round(zoom * 100);
+  const displayPercent = Math.round(viewZoom * 100);
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
 
   return (
@@ -947,11 +991,11 @@ export default function App() {
       <header className="topbar">
         <div className="brand-mark"><img src={photoIconUrl} alt="" /></div>
         <div className="brand"><strong>HINANA STUDIO</strong><span>PHOTO</span></div>
-        <div className="document-title"><i />{projectPath ? projectPath.split(/[\\/]/).pop() : fileName}</div>
+        <div className="document-title"><i />{projectPath ? projectPath.split(/[\\/]/).pop() : fileName}{loaded && <small>{dirty ? " · 저장 안 됨" : " · 저장됨"}</small>}</div>
         <div className="top-actions">
           <button onClick={() => void openImage()}><FolderOpen size={14} /> 열기</button>
           <button onClick={() => void openProject()}><FileArchive size={14} /> 프로젝트</button>
-          <button disabled={!loaded} onClick={() => void saveProject(false)}><Save size={14} /> 저장</button>
+          <button disabled={!loaded || saving} onClick={() => void saveProject(false)}><Save size={14} />{saving ? "저장 중…" : "저장"}</button>
           <button disabled={!loaded} onClick={() => setShowExport(true)} className="primary"><Download size={14} /> 내보내기</button>
         </div>
       </header>
@@ -960,6 +1004,7 @@ export default function App() {
         <aside className="left-panel">
           <nav className="tool-rail">
             <button className={tool === "move" ? "active" : ""} onClick={() => setTool("move")}><MousePointer2 size={20} /><span>이동</span><kbd>V</kbd></button>
+            <button className={tool === "hand" ? "active" : ""} onClick={() => setTool("hand")}><Hand size={20} /><span>손 도구</span><kbd>H</kbd></button>
             <button className={tool === "mosaic" ? "active" : ""} onClick={() => setTool("mosaic")}><Blend size={20} /><span>모자이크</span><kbd>M</kbd></button>
             <button disabled={!loaded} className={tool === "brush" ? "active" : ""} onClick={() => setTool("brush")}><Brush size={20} /><span>브러시</span><kbd>B</kbd></button>
             <button disabled={!loaded} className={tool === "text" ? "active" : ""} onClick={() => setTool("text")}><TextCursorInput size={20} /><span>텍스트</span><kbd>T</kbd></button>
@@ -970,9 +1015,7 @@ export default function App() {
             <div className="panel-heading"><ImageIcon size={15} /> 이미지</div>
             {loaded ? <>
               <div className="thumbnail-card">
-                <canvas className="thumbnail" width={sourceRef.current.width || 1} height={sourceRef.current.height || 1} ref={(node) => {
-                  if (node && canvasRef.current && loaded) node.getContext("2d")?.drawImage(canvasRef.current, 0, 0, node.width, node.height);
-                }} />
+                <canvas className="thumbnail" width={120} height={90} ref={thumbnailRef} />
                 <div><strong>{fileName}</strong><span>{sourceRef.current.width} × {sourceRef.current.height}</span></div>
               </div>
               <div className="section-label">빠른 변형</div>
@@ -991,7 +1034,7 @@ export default function App() {
           <div className="canvas-toolbar">
             <div><button disabled={!loaded} onClick={() => void undo()} title="실행 취소"><Undo2 size={15} /></button><button disabled={!loaded} onClick={() => void redo()} title="다시 실행"><Redo2 size={15} /></button></div>
             <span className="toolbar-separator" />
-            <div><button onClick={() => setZoom((z) => Math.max(.1, z - .1))}><ZoomOut size={15} /></button><button className="zoom-readout" onClick={() => { setZoom(1); setPan({ x: 0, y: 0 }); }}>{displayPercent}%</button><button onClick={() => setZoom((z) => Math.min(4, z + .1))}><ZoomIn size={15} /></button></div>
+            <div><button title="축소" onClick={() => changeZoom(-.1)}><ZoomOut size={15} /></button><button className="zoom-readout" title="화면에 맞추기" onClick={fitCanvas}>{displayPercent}%</button><button title="확대" onClick={() => changeZoom(.1)}><ZoomIn size={15} /></button><button onClick={fitCanvas}>맞춤</button><button onClick={() => { setFitView(false); setZoom(1); setPan({ x: 0, y: 0 }); }}>1:1</button></div>
             {tool === "mosaic" && <div className="tool-options"><label>브러시 <input type="range" min="20" max="220" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /><b>{brushSize}px</b></label><label>블록 <input type="range" min="4" max="40" value={mosaicSize} onChange={(e) => setMosaicSize(Number(e.target.value))} /><b>{mosaicSize}px</b></label></div>}
             {tool === "brush" && <div className="tool-options brush-options"><label>색상 <input type="color" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} /></label><label>크기 <input type="range" min="1" max="220" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /><b>{brushSize}px</b></label><label>불투명도 <input type="range" min="1" max="100" value={brushOpacity} onChange={(e) => setBrushOpacity(Number(e.target.value))} /><b>{brushOpacity}%</b></label></div>}
             {tool === "crop" && <div className="tool-options crop-options">
@@ -999,16 +1042,16 @@ export default function App() {
               <button className="crop-apply" onClick={applyCrop}>적용</button><button onClick={() => setTool("move")}>취소</button>
             </div>}
           </div>
-          <div className={`canvas-viewport ${tool}`}>
+          <div ref={viewportRef} className={`canvas-viewport ${tool}`}>
             {!loaded && <div className="welcome-drop"><div className="welcome-icon"><ImageIcon size={34} /></div><h1>사진 편집을 시작하세요</h1><p>이미지를 끌어다 놓거나 파일을 열어주세요.</p><button onClick={() => void openImage()}><FolderOpen size={15} /> 이미지 열기</button><span>PNG · JPG · WEBP · BMP</span></div>}
             <div className="canvas-pan" style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}>
-              <div className="canvas-frame" style={{ transform: `scale(${zoom})` }}>
+              <div className="canvas-frame" style={{ width: sourceRef.current.width * viewZoom, height: sourceRef.current.height * viewZoom }}>
                 <canvas ref={canvasRef} className={loaded ? "visible" : ""} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} />
                 {selectedLayer && tool === "move" && <div className="transform-box" style={{
                   left: `${50 + (selectedLayer.x / sourceRef.current.width) * 100}%`,
                   top: `${50 + (selectedLayer.y / sourceRef.current.height) * 100}%`,
-                  width: `${(selectedLayer.contentWidth * selectedLayer.scaleX / 100 / sourceRef.current.width) * 100}%`,
-                  height: `${(selectedLayer.contentHeight * selectedLayer.scaleY / 100 / sourceRef.current.height) * 100}%`,
+                  width: `${(selectedLayer.contentWidth * Math.abs(selectedLayer.scaleX) / 100 / sourceRef.current.width) * 100}%`,
+                  height: `${(selectedLayer.contentHeight * Math.abs(selectedLayer.scaleY) / 100 / sourceRef.current.height) * 100}%`,
                   transform: `translate(-50%, -50%) rotate(${selectedLayer.rotation}deg)`,
                 }}>
                   <span className="transform-handle nw" onPointerDown={(e) => transformPointerDown(e, "resize")} onPointerMove={transformPointerMove} onPointerUp={transformPointerUp} onPointerCancel={transformPointerUp} />
@@ -1073,9 +1116,11 @@ export default function App() {
       <input ref={layerFileInputRef} hidden type="file" accept="image/*" onChange={(e) => { const file = e.target.files?.[0]; if (file) void addImageLayerBlob(file, file.name); e.currentTarget.value = ""; }} />
       <input ref={projectFileInputRef} hidden type="file" accept=".hinanaphoto" onChange={(e) => { const file = e.target.files?.[0]; if (file) void file.text().then((raw) => restoreProject(raw, file.name)).catch((error) => setStatus(error instanceof Error ? error.message : "프로젝트를 열 수 없습니다.")); e.currentTarget.value = ""; }} />
 
+      {saving && <div className="dialog-overlay"><div className="export-dialog" role="status" style={{ padding: 32 }}>프로젝트를 안전하게 저장하고 있습니다…</div></div>}
       {showExport && <div className="dialog-overlay" onMouseDown={() => setShowExport(false)}><div className="export-dialog" onMouseDown={(e) => e.stopPropagation()}>
         <div className="dialog-heading"><div><Download size={19} /><span><strong>이미지 내보내기</strong><small>편집 결과를 새 파일로 저장합니다.</small></span></div><button onClick={() => setShowExport(false)}>×</button></div>
         <div className="dialog-body"><label>파일 형식</label><div className="format-options"><button className={exportFormat === "png" ? "selected" : ""} onClick={() => setExportFormat("png")}><strong>PNG</strong><span>무손실 · 최상의 품질</span></button><button className={exportFormat === "jpeg" ? "selected" : ""} onClick={() => setExportFormat("jpeg")}><strong>JPEG</strong><span>작은 용량 · 사진에 적합</span></button></div><div className="export-summary"><span>출력 크기</span><strong>{sourceRef.current.width} × {sourceRef.current.height}px</strong></div></div>
+        {exportFormat === "jpeg" && <label className="quality-control">JPEG 품질 · {exportQuality}%<input type="range" min="10" max="100" value={exportQuality} onChange={e => setExportQuality(Number(e.target.value))} /><small>투명한 영역은 흰색으로 저장됩니다.</small></label>}
         <div className="dialog-actions"><button onClick={() => setShowExport(false)}>취소</button><button className="primary" onClick={() => void exportImage()}><Download size={14} /> 내보내기</button></div>
       </div></div>}
 

@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("hinanaPhoto", {
   platform: process.platform,
   selectImage: () => ipcRenderer.invoke("image:select"),
   newProject: () => ipcRenderer.invoke("project:new"),
+  adoptProject: (filePath: string) => ipcRenderer.invoke("project:adopt", filePath),
   saveProject: (data: string, saveAs = false) => ipcRenderer.invoke("project:save", data, saveAs),
   openProject: () => ipcRenderer.invoke("project:open"),
   onProjectFile: (callback: (project: { path: string; data: string }) => void) => {

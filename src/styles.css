@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Inter:wght@400;500;600;700&display=swap");
+/* System fonts keep the editor usable offline on Windows and macOS. */
 
 :root { color-scheme: dark; font-family: Inter, "Noto Sans KR", sans-serif; --bg: #0d0f13; --panel: #111318; --panel-2: #17191f; --line: #292c34; --muted: #747986; --text: #d8dae2; --acid: #ffc639; }
 * { box-sizing: border-box; }
@@ -230,4 +230,65 @@ span.layer-eye { display: grid; place-items: center; }
   .tool-options label:first-child { display: none; }
   .top-actions button { width: 31px; justify-content: center; padding: 0; overflow: hidden; font-size: 0; }
   .document-title { max-width: 120px; }
+}
+
+/* Photo workspace refresh: readable controls, true pixel zoom, visible transparency. */
+:root { font-family: "Segoe UI", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; --muted: #969daa; }
+button, input, textarea, select { font-family: inherit; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--acid); outline-offset: 3px; }
+.workspace { grid-template-columns: 240px minmax(0,1fr) 310px; }
+.left-panel { grid-template-columns: 64px minmax(0,1fr); }
+.brand { min-width: 145px; }
+.brand strong { font-size: 11px; }
+.top-actions button { font-size: 11px; height: 34px; }
+.document-title { max-width: 280px; font-size: 11px; }
+.document-title small { color: #d2ae57; font-size: 10px; }
+.tool-rail { gap: 4px; overflow-y: auto; }
+.tool-rail button { min-height: 55px; font-size: 10px; color: #979daa; }
+.tool-rail kbd { font-size: 9px; }
+.tool-rail button.active { box-shadow: inset 3px 0 var(--acid); }
+.thumbnail-card { flex-direction: column; align-items: stretch; }
+.thumbnail { width: 100%; height: 84px; object-fit: contain; }
+.thumbnail-card strong { font-size: 11px; }
+.thumbnail-card span, .section-label, .reset-button { font-size: 10px; }
+.center-stage { grid-template-rows: auto minmax(0,1fr); }
+.canvas-toolbar { min-height: 48px; flex-wrap: wrap; gap: 6px; padding: 7px 10px; }
+.canvas-toolbar button, .canvas-toolbar .zoom-readout { font-size: 11px; }
+.canvas-toolbar .tool-options { flex-wrap: wrap; gap: 10px; padding: 4px 0; }
+.tool-options label { font-size: 11px; color: #aeb4c0; }
+.tool-options b, .crop-options input[type="number"] { font-size: 10px; }
+.canvas-viewport { background: #191c22; }
+.canvas-viewport::after { display: none; }
+.canvas-frame { flex-shrink: 0; background: repeating-conic-gradient(#353943 0% 25%, #292d35 0% 50%) 0 0 / 20px 20px; }
+.canvas-pan canvas { width: 100%; height: 100%; max-width: none; max-height: none; }
+.canvas-viewport.hand canvas { cursor: grab; }
+.canvas-viewport.hand canvas:active { cursor: grabbing; }
+.canvas-viewport.move canvas { cursor: move; }
+.panel-tabs button, .inspector-title strong, .layer-row strong { font-size: 12px; }
+.inspector-title span, .layer-row small, .preset-title { font-size: 10px; }
+.adjustment > span b, .adjustment output, .presets button { font-size: 11px; }
+.layer-properties label, .layer-slider span, .layer-slider b, .layer-name input, .text-properties textarea, .text-properties select, .text-properties input, .layer-create-actions button { font-size: 11px; }
+.layer-row { min-height: 60px; }
+.layer-slider { min-height: 34px; }
+.right-panel, .layers-panel { min-height: 0; }
+.layers-panel { overflow-y: auto; }
+.layer-list { flex-shrink: 0; }
+.layer-slider { grid-template-columns: 60px minmax(0,1fr) 48px; }
+.statusbar { font-size: 10px; }
+.about-dialog { max-width: calc(100vw - 40px); }
+.about-dialog > p, .about-dialog dl div { font-size: 11px; }
+.about-copyright, .about-copyright button { font-size: 9px; }
+.about-github { color: var(--acid); font-size: 11px; }
+.license-content { font-size: 12px; }
+.license-content h4 { font-size: 12px; }
+.quality-control { display: grid; gap: 10px; padding: 0 22px 20px; font-size: 12px; }
+.quality-control input { accent-color: var(--acid); width: 100%; }
+.quality-control small { color: #a4aab6; }
+@media (max-width: 1180px) {
+  .workspace { grid-template-columns: 64px minmax(0,1fr) 280px; }
+  .left-panel { grid-template-columns: 64px; }
+  .left-content { display: none; }
+  .tool-options label:first-child { display: flex; }
+  .top-actions button { width: auto; padding: 0 9px; font-size: 10px; }
+  .document-title { max-width: 190px; }
 }
