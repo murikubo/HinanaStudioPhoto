@@ -26,6 +26,7 @@ const deliverPendingProject = async () => {
 const installMenu = () => {
   const template: MenuItemConstructorOptions[] = [
     { label: "파일", submenu: [
+      { label: "새로 만들기", accelerator: "CmdOrCtrl+N", click: () => send("new") },
       { label: "이미지 열기", accelerator: "CmdOrCtrl+O", click: () => send("open") },
       { label: "이미지를 레이어로 추가", accelerator: "CmdOrCtrl+Shift+O", click: () => send("importLayer") },
       { type: "separator" },
@@ -52,6 +53,7 @@ const installMenu = () => {
       { role: "toggleDevTools", label: "개발자 도구" },
     ]},
     { label: "도움말", submenu: [
+      { label: "단축키 안내", click: () => send("help") },
       { label: "HINANA STUDIO PHOTO 정보", click: () => send("about") },
     ]},
   ];

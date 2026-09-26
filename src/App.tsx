@@ -1,18 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { transformLayer, cropLayer } from "./editorGeometry";
+import { imageSize, cropPreset, nudgePosition, pixelHex } from "./editorUtilities";
+import NewCanvasDialog from "./NewCanvasDialog";
 import {
   Blend, Brush, ChevronDown, ChevronUp, Download, FlipHorizontal2, FlipVertical2,
   AlignCenter, AlignLeft, AlignRight, Bold, Copy, Eye, EyeOff, FileArchive, FolderOpen, Image as ImageIcon, Info, Layers3,
-  Hand, MousePointer2, PanelRight, Plus, Redo2, RotateCcw, RotateCw,
+  LockKeyhole, LockKeyholeOpen, Eraser, Pipette, Keyboard, Hand, MousePointer2, PanelRight, Plus, Redo2, RotateCcw, RotateCw,
   Save, SlidersHorizontal, TextCursorInput, Trash2, Undo2, Upload, X, ZoomIn, ZoomOut,
 } from "lucide-react";
 import photoIconUrl from "../photoicon.png";
 import packageInfo from "../package.json";
 
-type Tool = "move" | "mosaic" | "brush" | "crop" | "text" | "hand";
+type Tool = "move" | "mosaic" | "brush" | "crop" | "text" | "hand" | "eraser" | "eyedropper";
 type AdjustmentKey = "brightness" | "contrast" | "saturation" | "temperature" | "hue";
 type Adjustments = Record<AdjustmentKey, number>;
 type LayerMeta = {
+  locked?: boolean;
+  blendMode?: GlobalCompositeOperation;
   id: string;
   name: string;
   kind: "pixel" | "text";
@@ -84,6 +88,12 @@ export default function App() {
   const savingRef = useRef(false);
   const restoringRef = useRef(false);
   const [exportQuality, setExportQuality] = useState(92);
+  const [exportScale, setExportScale] = useState(100);
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [showNew, setShowNew] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [creating, setCreating] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const layerFileInputRef = useRef<HTMLInputElement>(null);
   const projectFileInputRef = useRef<HTMLInputElement>(null);
@@ -115,12 +125,30 @@ export default function App() {
   const [status, setStatus] = useState("이미지를 열거나 이곳에 드래그하세요");
   const [exportFormat, setExportFormat] = useState<"png" | "jpeg">("png");
   const [showExport, setShowExport] = useState(false);
-  const [activePanel, setActivePanel] = useState<"adjust" | "layers">("adjust");
+  const [activePanel, setActivePanel] = useState<"adjust" | "layers">("layers");
   const [layers, setLayers] = useState<LayerMeta[]>([]);
   const [selectedLayerId, setSelectedLayerId] = useState("background");
   const [showAbout, setShowAbout] = useState(false);
   const [showLicense, setShowLicense] = useState(false);
   const [projectPath, setProjectPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!showNew && !showHelp && !showExport) return;
+    const previous = document.activeElement as HTMLElement | null;
+    const dialog = document.querySelector<HTMLElement>(".utility-dialog, .export-dialog");
+    const focusable = () => Array.from(dialog?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]') || []);
+    focusable()[0]?.focus();
+    const trap = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      const first = items[0], last = items[items.length - 1];
+      if (!first) { event.preventDefault(); return; }
+      if (event.shiftKey && (document.activeElement === first || !dialog?.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !dialog?.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", trap);
+    return () => { document.removeEventListener("keydown", trap); if (previous?.isConnected) previous.focus(); };
+  }, [showNew, showHelp, showExport]);
 
   useEffect(() => {
     const viewport = viewportRef.current;
@@ -162,6 +190,7 @@ export default function App() {
       if (!layerCanvas) continue;
       ctx.save();
       ctx.globalAlpha = layer.opacity / 100;
+      ctx.globalCompositeOperation = layer.blendMode || "source-over";
       ctx.translate(source.width / 2 + layer.x, source.height / 2 + layer.y);
       ctx.rotate((layer.rotation * Math.PI) / 180);
       ctx.scale(layer.scaleX / 100, layer.scaleY / 100);
@@ -221,6 +250,8 @@ export default function App() {
       const legacyScale = (saved as LayerSnapshot & { scale?: number }).scale || 100;
       restoredLayers.push({
         id: saved.id,
+        locked: saved.locked === true,
+        blendMode: (["source-over", "multiply", "screen", "overlay", "darken", "lighten", "difference"] as string[]).includes(saved.blendMode || "") ? saved.blendMode : "source-over",
         name: saved.name,
         kind: saved.kind || "pixel",
         visible: saved.visible,
@@ -340,7 +371,7 @@ export default function App() {
   };
 
   const loadBlob = async (blob: Blob, name: string) => {
-    if (dirty && !window.confirm("저장하지 않은 변경사항을 닫고 이미지를 여시겠습니까?")) return;
+    if (dirty && !window.confirm("저장하지 않은 변경사항을 닫고 새 이미지로 전환하시겠습니까?")) return false;
     const url = URL.createObjectURL(blob);
     try {
       const image = await dataUrlToImage(url);
@@ -360,12 +391,14 @@ export default function App() {
       adjustmentsRef.current = DEFAULT_ADJUSTMENTS;
       setFileName(name);
       setLoaded(true);
+      setTool("move");
       fitCanvas();
       setZoom(1);
       setPan({ x: 0, y: 0 });
       setRevision((value) => value + 1);
       setStatus(`${image.naturalWidth} × ${image.naturalHeight}px · ${name}`);
-    } catch (error) { setStatus(`이미지를 열 수 없습니다: ${error instanceof Error ? error.message : error}`); } finally {
+      return true;
+    } catch (error) { setStatus(`이미지를 열 수 없습니다: ${error instanceof Error ? error.message : error}`); return false; } finally {
       URL.revokeObjectURL(url);
     }
   };
@@ -375,6 +408,22 @@ export default function App() {
       const selected = await window.hinanaPhoto.selectImage();
       if (selected) await loadBlob(new Blob([selected.data]), selected.name);
     } else fileInputRef.current?.click();
+  };
+
+  const createCanvas = async (width: number, height: number, color: string | null, name: string) => {
+    setCreating(true);
+    try {
+    const size = imageSize(width, height);
+    const canvas = document.createElement("canvas");
+    canvas.width = size.width; canvas.height = size.height;
+    if (color) { const ctx = canvas.getContext("2d")!; ctx.fillStyle = color; ctx.fillRect(0, 0, width, height); }
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, "image/png"));
+    if (!blob) throw new Error("캔버스를 만들지 못했습니다. 크기를 줄여보세요.");
+    const safeName = name.trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "_").replace(/\.+$/, "") || "제목 없는 이미지";
+    const created = await loadBlob(blob, `${safeName.replace(/\.png$/i, "")}.png`);
+    if (created) { setActivePanel("layers"); setTool("brush"); setStatus(`${safeName} · ${size.width} × ${size.height}px 이미지 생성 완료`); }
+    return created;
+    } finally { setCreating(false); }
   };
 
   const transformImage = (kind: "cw" | "ccw" | "flipH" | "flipV") => {
@@ -443,6 +492,7 @@ export default function App() {
     const previous = begin || !brushLastPointRef.current ? point : brushLastPointRef.current;
     context.save();
     context.globalAlpha = brushOpacity / 100;
+    context.globalCompositeOperation = tool === "eraser" ? "destination-out" : "source-over";
     context.strokeStyle = brushColor;
     context.lineWidth = Math.max(1, brushSize * point.scale);
     context.lineCap = "round";
@@ -484,10 +534,22 @@ export default function App() {
   };
 
   const pointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!loaded) return;
+    if (!loaded || event.button !== 0) return;
+    if (tool === "eyedropper") {
+      const point = canvasPoint(event.clientX, event.clientY);
+      const canvas = canvasRef.current;
+      if (!point || !canvas) return;
+      const pixel = canvas.getContext("2d")!.getImageData(clamp(Math.floor(point.x), 0, canvas.width - 1), clamp(Math.floor(point.y), 0, canvas.height - 1), 1, 1).data;
+      const color = pixelHex(pixel);
+      if (!color) { setStatus("완전히 투명한 픽셀에서는 색상을 추출할 수 없습니다."); return; }
+      setBrushColor(color); setTool("brush"); setStatus(`색상 ${color.toUpperCase()} 추출 · 브러시로 전환했습니다`); return;
+    }
     const selected = layers.find(l => l.id === selectedLayerId);
-    if ((tool === "brush" || tool === "mosaic") && selected && (!selected.visible || selected.kind === "text")) {
-      setStatus("브러시·모자이크는 표시 중인 픽셀 레이어를 선택해 사용하세요."); return;
+    if (selected?.locked && tool !== "hand" && tool !== "crop" && tool !== "text") {
+      setStatus("잠긴 레이어입니다. 레이어 목록에서 잠금을 해제하세요."); return;
+    }
+    if ((tool === "brush" || tool === "mosaic" || tool === "eraser") && selected && (!selected.visible || selected.kind === "text")) {
+      setStatus("브러시·지우개·모자이크는 표시 중인 픽셀 레이어를 선택해 사용하세요."); return;
     }
     if (tool === "crop") return;
     if (tool === "text") {
@@ -499,7 +561,7 @@ export default function App() {
       strokeSnapshotRef.current = currentSnapshot();
       setPainting(true);
       applyMosaic(event.clientX, event.clientY);
-    } else if (tool === "brush") {
+    } else if (tool === "brush" || tool === "eraser") {
       strokeSnapshotRef.current = currentSnapshot();
       brushLastPointRef.current = null;
       setPainting(true);
@@ -526,7 +588,7 @@ export default function App() {
 
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (painting && tool === "mosaic") applyMosaic(event.clientX, event.clientY);
-    if (painting && tool === "brush") applyBrush(event.clientX, event.clientY);
+    if (painting && (tool === "brush" || tool === "eraser")) applyBrush(event.clientX, event.clientY);
     if (layerMoveRef.current) {
       const drag = layerMoveRef.current;
       const x = drag.x + ((event.clientX - drag.startX) / drag.displayWidth) * sourceRef.current.width;
@@ -544,7 +606,7 @@ export default function App() {
       undoRef.current.push(strokeSnapshotRef.current);
       redoRef.current = [];
       strokeSnapshotRef.current = null;
-      setStatus(tool === "brush" ? "브러시 획을 적용했습니다" : "모자이크를 적용했습니다");
+      setStatus(tool === "eraser" ? "지우개 획을 적용했습니다" : tool === "brush" ? "브러시 획을 적용했습니다" : "모자이크를 적용했습니다");
     }
     if (layerMoveRef.current && strokeSnapshotRef.current) {
       undoRef.current.push(strokeSnapshotRef.current);
@@ -554,6 +616,7 @@ export default function App() {
     }
     brushLastPointRef.current = null;
     layerMoveRef.current = null;
+    if (undoRef.current.length > 30) undoRef.current.splice(0, undoRef.current.length - 30);
     setPainting(false);
     setDragging(false);
   };
@@ -654,6 +717,7 @@ export default function App() {
 
   const transformPointerDown = (event: React.PointerEvent<HTMLElement>, mode: "resize" | "rotate") => {
     const layer = layers.find((item) => item.id === selectedLayerId);
+    if (layer?.locked) return;
     const frame = canvasRef.current?.getBoundingClientRect();
     if (!layer || !frame) return;
     event.preventDefault();
@@ -843,8 +907,8 @@ export default function App() {
 
   const duplicateLayer = () => {
     const selected = layers.find((layer) => layer.id === selectedLayerId);
-    const sourceLayer = selected && layerCanvasesRef.current.get(selected.id);
-    if (!selected || !sourceLayer) return;
+    const sourceLayer = selectedLayerId === "background" ? sourceRef.current : selected && layerCanvasesRef.current.get(selected.id);
+    if (!loaded || !sourceLayer) return;
     pushUndo();
     const id = `layer-${Date.now().toString(36)}`;
     const canvas = document.createElement("canvas");
@@ -852,13 +916,16 @@ export default function App() {
     canvas.height = sourceLayer.height;
     canvas.getContext("2d")!.drawImage(sourceLayer, 0, 0);
     layerCanvasesRef.current.set(id, canvas);
-    setLayers((current) => [...current, { ...selected, id, name: `${selected.name} 복사본` }]);
+    const base: LayerMeta = selected || { id: "background", name: fileName, kind: "pixel", visible: true, opacity: 100, x: 0, y: 0, scaleX: 100, scaleY: 100, rotation: 0, contentWidth: sourceLayer.width, contentHeight: sourceLayer.height };
+    setLayers((current) => [...current, { ...base, id, locked: false, name: `${base.name} 복사본` }]);
+    setActivePanel("layers");
     setSelectedLayerId(id);
     setRevision((value) => value + 1);
   };
 
   const deleteLayer = () => {
     if (selectedLayerId === "background") return;
+    if (layers.find(layer => layer.id === selectedLayerId)?.locked) { setStatus("잠금을 해제한 뒤 삭제하세요."); return; }
     pushUndo();
     layerCanvasesRef.current.delete(selectedLayerId);
     setLayers((current) => current.filter((layer) => layer.id !== selectedLayerId));
@@ -868,6 +935,7 @@ export default function App() {
   };
 
   const updateLayer = (id: string, patch: Partial<LayerMeta>, saveHistory = false) => {
+    if (layers.find(layer => layer.id === id)?.locked && Object.keys(patch).some(key => key !== "locked" && key !== "visible")) return;
     if (saveHistory) pushUndo();
     const textChanged = ["text", "fontSize", "fontFamily", "fontWeight", "textColor", "textAlign"].some(key => key in patch);
     setLayers(layers.map((layer) => {
@@ -879,6 +947,7 @@ export default function App() {
 
   const moveLayerOrder = (direction: "up" | "down") => {
     const index = layers.findIndex((layer) => layer.id === selectedLayerId);
+    if (layers[index]?.locked) return;
     if (index < 0) return;
     const nextIndex = direction === "up" ? Math.min(layers.length - 1, index + 1) : Math.max(0, index - 1);
     if (nextIndex === index) return;
@@ -893,19 +962,25 @@ export default function App() {
 
   const exportImage = async () => {
     const canvas = canvasRef.current;
-    if (!canvas || !loaded) return;
+    if (!canvas || !loaded || exporting) return;
+    setExporting(true);
+    setExportError("");
+    try {
     const mime = exportFormat === "jpeg" ? "image/jpeg" : "image/png";
     render();
-    const output = document.createElement("canvas"); output.width = canvas.width; output.height = canvas.height;
+    const size = imageSize(canvas.width, canvas.height, exportScale);
+    const output = document.createElement("canvas"); output.width = size.width; output.height = size.height;
     const context = output.getContext("2d")!;
     if (exportFormat === "jpeg") { context.fillStyle = "#ffffff"; context.fillRect(0, 0, output.width, output.height); }
-    context.drawImage(canvas, 0, 0);
+    context.imageSmoothingEnabled = true; context.imageSmoothingQuality = "high";
+    context.drawImage(canvas, 0, 0, output.width, output.height);
     const blob = await new Promise<Blob | null>((resolve) => output.toBlob(resolve, mime, exportQuality / 100));
-    if (!blob) return;
+    if (!blob) throw new Error("이미지를 생성하지 못했습니다. 출력 크기를 줄여보세요.");
     const bytes = await blob.arrayBuffer();
     if (window.hinanaPhoto) {
       const saved = await window.hinanaPhoto.exportImage(bytes, fileName, exportFormat);
-      if (saved) setStatus(`내보내기 완료 · ${saved}`);
+      if (!saved) return;
+      setStatus(`내보내기 완료 · ${saved}`);
     } else {
       const link = document.createElement("a");
       link.href = URL.createObjectURL(blob);
@@ -915,11 +990,15 @@ export default function App() {
       setStatus("이미지를 내보냈습니다");
     }
     setShowExport(false);
+    } catch (error) { const message = `내보내기 실패: ${error instanceof Error ? error.message : error}`; setStatus(message); setExportError(message); }
+    finally { setExporting(false); }
   };
 
   useEffect(() => {
     const cleanup = window.hinanaPhoto?.onMenuAction((action) => {
-      if (saving || restoringRef.current) return;
+      if (saving || restoringRef.current || exporting || showNew || showHelp || showExport || showAbout || showLicense || painting || dragging) return;
+      if (action === "new") setShowNew(true);
+      if (action === "help") setShowHelp(true);
       if ((action === "undo" || action === "redo") && document.activeElement?.matches("input,textarea,[contenteditable=true]")) {
         document.execCommand(action); return;
       }
@@ -947,13 +1026,16 @@ export default function App() {
       window.hinanaPhoto?.rendererReady();
     }
     const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving && !exporting && !creating) { setShowNew(false); setShowHelp(false); setShowExport(false); setShowAbout(false); setShowLicense(false); if (!painting) setTool("move"); return; }
       if (event.isComposing || (event.target instanceof HTMLElement && event.target.closest("input,textarea,select,[contenteditable=true]"))) return;
-      if (event.key === "Escape") { setShowExport(false); setShowAbout(false); setShowLicense(false); setTool("move"); return; }
-      if (showAbout || showLicense || showExport || saving) return;
+      if (showAbout || showLicense || showExport || showNew || showHelp || saving || exporting || restoringRef.current || painting || dragging) return;
       const key = event.key.toLowerCase();
+      if (event.key === "?" || event.key === "F1") { event.preventDefault(); setShowHelp(true); return; }
       if (event.ctrlKey || event.metaKey) {
+        if (key === "d" && loaded) { event.preventDefault(); duplicateLayer(); return; }
         // Electron owns native menu accelerators; browser preview needs its own.
         if (!window.hinanaPhoto) {
+          if (key === "n") { event.preventDefault(); setShowNew(true); }
           if (key === "s") { event.preventDefault(); void saveProject(event.shiftKey); }
           if (key === "o") { event.preventDefault(); if (event.altKey) void openProject(); else if (event.shiftKey) void importImageLayer(); else void openImage(); }
           if (key === "z") { event.preventDefault(); if (event.shiftKey) void redo(); else void undo(); }
@@ -964,6 +1046,16 @@ export default function App() {
       if (key === "h") setTool("hand");
       if (key === "v") setTool("move");
       if (loaded) {
+        if (key === "e") setTool("eraser");
+        if (key === "i") setTool("eyedropper");
+        if (key === "[" || key === "]") { event.preventDefault(); setBrushSize(size => clamp(size + (key === "[" ? -5 : 5), 1, 220)); }
+        if (tool === "move" && selectedLayerId !== "background" && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) {
+          event.preventDefault();
+          if (layers.find(layer => layer.id === selectedLayerId)?.locked) return;
+          if (!event.repeat) pushUndo();
+          setLayers(current => current.map(layer => layer.id === selectedLayerId ? { ...layer, ...nudgePosition(layer.x, layer.y, event.key, event.shiftKey) } : layer));
+          return;
+        }
         if (key === "m") setTool("mosaic");
         if (key === "b") setTool("brush");
         if (key === "c") setTool("crop");
@@ -980,8 +1072,9 @@ export default function App() {
   const selectedLayer = layers.find((layer) => layer.id === selectedLayerId);
 
   return (
-    <main className="app-shell" onDragOver={(e) => e.preventDefault()} onDrop={(e) => {
+    <main className={`app-shell studio-renewal ${window.hinanaPhoto?.platform === "darwin" ? "platform-mac" : ""}`} onDragOver={(e) => e.preventDefault()} onDrop={(e) => {
       e.preventDefault();
+      if (showNew || showHelp || showExport || showAbout || showLicense || saving || creating) return;
       const file = e.dataTransfer.files[0];
       if (file?.type.startsWith("image/")) {
         if (loaded) void addImageLayerBlob(file, file.name);
@@ -991,8 +1084,9 @@ export default function App() {
       <header className="topbar">
         <div className="brand-mark"><img src={photoIconUrl} alt="" /></div>
         <div className="brand"><strong>HINANA STUDIO</strong><span>PHOTO</span></div>
-        <div className="document-title"><i />{projectPath ? projectPath.split(/[\\/]/).pop() : fileName}{loaded && <small>{dirty ? " · 저장 안 됨" : " · 저장됨"}</small>}</div>
+        <div className="header-workspace-label">사진 편집 스튜디오</div>
         <div className="top-actions">
+          <button title="새로 만들기 (Ctrl/⌘+N)" onClick={() => setShowNew(true)}><Plus size={14} /> 새로 만들기</button>
           <button onClick={() => void openImage()}><FolderOpen size={14} /> 열기</button>
           <button onClick={() => void openProject()}><FileArchive size={14} /> 프로젝트</button>
           <button disabled={!loaded || saving} onClick={() => void saveProject(false)}><Save size={14} />{saving ? "저장 중…" : "저장"}</button>
@@ -1002,14 +1096,19 @@ export default function App() {
 
       <section className="workspace">
         <aside className="left-panel">
-          <nav className="tool-rail">
+          <div className="workspace-title">작업 공간 <span>LOCAL</span></div>
+          <button className="sidebar-import" onClick={() => void openImage()}><FolderOpen size={16} /> 이미지 불러오기 <kbd>⌘ / Ctrl O</kbd></button>
+          <button className="sidebar-new" onClick={() => setShowNew(true)}><Plus size={15} /> 새로 만들기 <kbd>⌘ / Ctrl N</kbd></button>
+          <div className="sidebar-caption">편집 도구</div>
+          <nav className="tool-rail" aria-label="편집 도구">
             <button className={tool === "move" ? "active" : ""} onClick={() => setTool("move")}><MousePointer2 size={20} /><span>이동</span><kbd>V</kbd></button>
             <button className={tool === "hand" ? "active" : ""} onClick={() => setTool("hand")}><Hand size={20} /><span>손 도구</span><kbd>H</kbd></button>
-            <button className={tool === "mosaic" ? "active" : ""} onClick={() => setTool("mosaic")}><Blend size={20} /><span>모자이크</span><kbd>M</kbd></button>
+            <button disabled={!loaded} className={tool === "mosaic" ? "active" : ""} onClick={() => setTool("mosaic")}><Blend size={20} /><span>모자이크</span><kbd>M</kbd></button>
             <button disabled={!loaded} className={tool === "brush" ? "active" : ""} onClick={() => setTool("brush")}><Brush size={20} /><span>브러시</span><kbd>B</kbd></button>
+            <button disabled={!loaded} className={tool === "eraser" ? "active" : ""} onClick={() => setTool("eraser")}><Eraser size={20} /><span>지우개</span><kbd>E</kbd></button>
+            <button disabled={!loaded} className={tool === "eyedropper" ? "active" : ""} onClick={() => setTool("eyedropper")}><Pipette size={20} /><span>스포이드</span><kbd>I</kbd></button>
             <button disabled={!loaded} className={tool === "text" ? "active" : ""} onClick={() => setTool("text")}><TextCursorInput size={20} /><span>텍스트</span><kbd>T</kbd></button>
             <button disabled={!loaded} className={tool === "crop" ? "active" : ""} onClick={() => setTool("crop")}><PanelRight size={20} /><span>자르기</span><kbd>C</kbd></button>
-            <button className="info-tool" onClick={() => setShowAbout(true)}><Info size={19} /><span>정보</span></button>
           </nav>
           <div className="left-content">
             <div className="panel-heading"><ImageIcon size={15} /> 이미지</div>
@@ -1028,26 +1127,34 @@ export default function App() {
               <button className="reset-button" onClick={() => void resetAll()}><RotateCcw size={13} /> 원본으로 초기화</button>
             </> : <button className="empty-library" onClick={() => void openImage()}><span><ImageIcon size={28} /></span><strong>이미지를 열어보세요</strong><small>PNG, JPG, WEBP, BMP</small></button>}
           </div>
+          <div className="sidebar-bottom"><span className="local-indicator"><i /> 로컬 작업 공간</span><p>이미지와 프로젝트는 내 PC에 저장됩니다.</p><button onClick={() => setShowAbout(true)}><Info size={15} /> HINANA STUDIO PHOTO 정보</button><small>HINANA STUDIO <span>{packageInfo.version}</span></small></div>
+          <button className="sidebar-help" onClick={() => setShowHelp(true)}><Keyboard size={15} /> 단축키 안내 <kbd>?</kbd></button>
         </aside>
 
         <section className="center-stage">
+          <div className="document-heading"><div><span className="eyebrow">PHOTO WORKSPACE</span><h1>{loaded ? (projectPath ? projectPath.split(/[\\/]/).pop() : fileName) : "새로운 이야기를 시작하세요"}</h1><p>{loaded ? `${sourceRef.current.width} × ${sourceRef.current.height} px · ${layers.length + 1}개 레이어` : "사진 보정부터 레이어 합성까지, 하나의 작업 공간에서."}</p></div><span className={`document-badge ${dirty ? "unsaved" : ""}`}><i />{loaded ? (dirty ? "저장하지 않은 변경" : "프로젝트 저장됨") : "편집 준비 완료"}</span></div>
           <div className="canvas-toolbar">
             <div><button disabled={!loaded} onClick={() => void undo()} title="실행 취소"><Undo2 size={15} /></button><button disabled={!loaded} onClick={() => void redo()} title="다시 실행"><Redo2 size={15} /></button></div>
             <span className="toolbar-separator" />
             <div><button title="축소" onClick={() => changeZoom(-.1)}><ZoomOut size={15} /></button><button className="zoom-readout" title="화면에 맞추기" onClick={fitCanvas}>{displayPercent}%</button><button title="확대" onClick={() => changeZoom(.1)}><ZoomIn size={15} /></button><button onClick={fitCanvas}>맞춤</button><button onClick={() => { setFitView(false); setZoom(1); setPan({ x: 0, y: 0 }); }}>1:1</button></div>
             {tool === "mosaic" && <div className="tool-options"><label>브러시 <input type="range" min="20" max="220" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /><b>{brushSize}px</b></label><label>블록 <input type="range" min="4" max="40" value={mosaicSize} onChange={(e) => setMosaicSize(Number(e.target.value))} /><b>{mosaicSize}px</b></label></div>}
             {tool === "brush" && <div className="tool-options brush-options"><label>색상 <input type="color" value={brushColor} onChange={(e) => setBrushColor(e.target.value)} /></label><label>크기 <input type="range" min="1" max="220" value={brushSize} onChange={(e) => setBrushSize(Number(e.target.value))} /><b>{brushSize}px</b></label><label>불투명도 <input type="range" min="1" max="100" value={brushOpacity} onChange={(e) => setBrushOpacity(Number(e.target.value))} /><b>{brushOpacity}%</b></label></div>}
+            {tool === "eraser" && <div className="tool-options"><label>지우개 크기 <input type="range" min="1" max="220" value={brushSize} onChange={e => setBrushSize(Number(e.target.value))} /><b>{brushSize}px</b></label><label>강도 <input type="range" min="1" max="100" value={brushOpacity} onChange={e => setBrushOpacity(Number(e.target.value))} /><b>{brushOpacity}%</b></label></div>}
+            {tool === "eyedropper" && <div className="tool-options"><span className="tool-hint">이미지를 클릭하면 합성된 색상을 추출해 브러시로 전환합니다.</span></div>}
+            {tool === "move" && loaded && <div className="tool-options"><span className="tool-hint">레이어 이동: 방향키 1px · Shift + 방향키 10px · Shift + 핸들 드래그: 비율 유지</span></div>}
             {tool === "crop" && <div className="tool-options crop-options">
+              <label>영역 프리셋<select aria-label="자르기 영역 프리셋" value="" onChange={e => { if (e.target.value) setCropRect(cropPreset(sourceRef.current.width, sourceRef.current.height, Number(e.target.value))); }}><option value="">선택</option><option value="1">1:1 정사각형</option><option value={4/3}>4:3</option><option value={3/4}>3:4</option><option value={16/9}>16:9</option><option value={9/16}>9:16</option><option value={sourceRef.current.width/sourceRef.current.height}>전체 이미지</option></select></label>
               {(["x", "y", "width", "height"] as const).map((key) => <label key={key}>{key === "x" ? "왼쪽" : key === "y" ? "위" : key === "width" ? "너비" : "높이"}<input type="number" min={key === "width" || key === "height" ? "1" : "0"} max={key === "x" || key === "y" ? "99" : "100"} value={cropRect[key]} onChange={(e) => setCropRect((current) => ({ ...current, [key]: Math.max(key === "width" || key === "height" ? 1 : 0, Math.min(key === "x" || key === "y" ? 99 : 100, Number(e.target.value))) }))} /><b>%</b></label>)}
               <button className="crop-apply" onClick={applyCrop}>적용</button><button onClick={() => setTool("move")}>취소</button>
             </div>}
           </div>
           <div ref={viewportRef} className={`canvas-viewport ${tool}`}>
-            {!loaded && <div className="welcome-drop"><div className="welcome-icon"><ImageIcon size={34} /></div><h1>사진 편집을 시작하세요</h1><p>이미지를 끌어다 놓거나 파일을 열어주세요.</p><button onClick={() => void openImage()}><FolderOpen size={15} /> 이미지 열기</button><span>PNG · JPG · WEBP · BMP</span></div>}
-            <div className="canvas-pan" style={{ transform: `translate(${pan.x}px, ${pan.y}px)` }}>
+            {!loaded && <button className="welcome-new" onClick={() => setShowNew(true)}><Plus size={16} /> 새로 만들기 · 빈 이미지로 시작</button>}
+            {!loaded && <div className="welcome-drop"><div className="welcome-icon"><ImageIcon size={34} /></div><span className="eyebrow">YOUR PHOTO, YOUR STORY</span><h1>한 장의 사진, 무한한 가능성.</h1><p>이미지를 여기에 놓고 나만의 시선을 더해보세요.<br />색상 보정 · 레이어 합성 · 텍스트 디자인</p><button onClick={() => void openImage()}><FolderOpen size={15} /> 이미지 불러오기</button><button className="welcome-project" onClick={() => void openProject()}><FileArchive size={14} /> 저장한 프로젝트 이어서 작업</button><span>PNG · JPG · WEBP · BMP</span></div>}
+            <div className="canvas-pan" style={{ display: loaded ? undefined : "none", transform: `translate(${pan.x}px, ${pan.y}px)` }}>
               <div className="canvas-frame" style={{ width: sourceRef.current.width * viewZoom, height: sourceRef.current.height * viewZoom }}>
                 <canvas ref={canvasRef} className={loaded ? "visible" : ""} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={pointerUp} />
-                {selectedLayer && tool === "move" && <div className="transform-box" style={{
+                {selectedLayer && !selectedLayer.locked && selectedLayer.visible && tool === "move" && <div className="transform-box" style={{
                   left: `${50 + (selectedLayer.x / sourceRef.current.width) * 100}%`,
                   top: `${50 + (selectedLayer.y / sourceRef.current.height) * 100}%`,
                   width: `${(selectedLayer.contentWidth * Math.abs(selectedLayer.scaleX) / 100 / sourceRef.current.width) * 100}%`,
@@ -1069,7 +1176,8 @@ export default function App() {
         </section>
 
         <aside className="right-panel">
-          <div className="panel-tabs"><button className={activePanel === "adjust" ? "active" : ""} onClick={() => setActivePanel("adjust")}><SlidersHorizontal size={14} /> 조정</button><button className={activePanel === "layers" ? "active" : ""} onClick={() => setActivePanel("layers")}><Layers3 size={14} /> 레이어</button></div>
+          <div className="inspector-heading"><span>편집 설정</span><SlidersHorizontal size={15} /></div>
+          <div className="panel-tabs"><button className={activePanel === "layers" ? "active" : ""} onClick={() => setActivePanel("layers")}><Layers3 size={14} /> 레이어 {loaded ? layers.length + 1 : 0}</button><button className={activePanel === "adjust" ? "active" : ""} onClick={() => setActivePanel("adjust")}><SlidersHorizontal size={14} /> 조정</button></div>
           {activePanel === "adjust" ? <div className="inspector-body">
             <div className="inspector-title"><div><strong>색상 및 톤</strong><span>이미지 전체를 보정합니다</span></div><button disabled={!loaded} onClick={() => { pushUndo(); setAdjustments(DEFAULT_ADJUSTMENTS); }}><RotateCcw size={13} /></button></div>
             {adjustmentMeta.map((item) => <label className="adjustment" key={item.key}>
@@ -1083,14 +1191,19 @@ export default function App() {
               <button disabled={!loaded} onClick={() => { pushUndo(); setAdjustments({ brightness: 2, contrast: 18, saturation: -100, temperature: 0, hue: 0 }); }}>흑백</button>
             </div>
           </div> : <div className="layers-panel">
+            <div className="layer-overview"><span>위쪽 레이어가 앞에 표시됩니다</span><button disabled={!layers.length} onClick={() => { pushUndo(); setLayers(current => current.map(layer => ({ ...layer, visible: true }))); }}>모두 표시</button></div>
             <div className="layer-list">
               {[...layers].reverse().map((layer) => <div key={layer.id} className={`layer-row ${selectedLayerId === layer.id ? "active" : ""}`} onClick={() => setSelectedLayerId(layer.id)}>
                 <button className="layer-eye" onClick={(event) => { event.stopPropagation(); updateLayer(layer.id, { visible: !layer.visible }, true); }}>{layer.visible ? <Eye size={13} /> : <EyeOff size={13} />}</button>
+                <button className="layer-eye layer-lock" title={layer.locked ? "잠금 해제" : "레이어 잠금"} aria-label={layer.locked ? "잠금 해제" : "레이어 잠금"} aria-pressed={!!layer.locked} onClick={event => { event.stopPropagation(); updateLayer(layer.id, { locked: !layer.locked }, true); }}>{layer.locked ? <LockKeyhole size={13} /> : <LockKeyholeOpen size={13} />}</button>
                 <canvas className="layer-thumb" width="42" height="38" ref={(node) => { const source = layerCanvasesRef.current.get(layer.id); const context = node?.getContext("2d"); if (node && source && context) { context.clearRect(0, 0, 42, 38); context.drawImage(source, 0, 0, 42, 38); } }} /><div><strong>{layer.name}</strong><small>{layer.kind === "text" ? "텍스트" : "픽셀"} 레이어 · {layer.opacity}%</small></div><i />
               </div>)}
               <div className={`layer-row ${selectedLayerId === "background" ? "active" : ""}`} onClick={() => setSelectedLayerId("background")}><span className="layer-eye"><Eye size={13} /></span><canvas className="layer-thumb" width="42" height="38" ref={(node) => { const context = node?.getContext("2d"); if (node && loaded && context) { context.clearRect(0, 0, 42, 38); context.drawImage(sourceRef.current, 0, 0, 42, 38); } }} /><div><strong>{loaded ? fileName : "배경"}</strong><small>배경 레이어</small></div><i /></div>
             </div>
             {selectedLayer && <div className="layer-properties">
+              {selectedLayer.locked && <p className="layer-lock-note">잠김 · 이동, 그리기, 속성 편집 및 삭제가 보호됩니다.</p>}
+              <fieldset className="layer-edit-fields" disabled={selectedLayer.locked}>
+              <label className="layer-name"><span>혼합 모드</span><select value={selectedLayer.blendMode || "source-over"} onChange={e => updateLayer(selectedLayer.id, { blendMode: e.target.value as GlobalCompositeOperation }, true)}>{[["source-over","일반"],["multiply","곱하기"],["screen","스크린"],["overlay","오버레이"],["darken","어둡게"],["lighten","밝게"],["difference","차이"]].map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label>
               <label className="layer-name"><span>이름</span><input value={selectedLayer.name} onFocus={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { name: e.target.value })} /></label>
               {selectedLayer.kind === "text" && <div className="text-properties">
                 <label><span>내용</span><textarea value={selectedLayer.text || ""} onFocus={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { text: e.target.value })} /></label>
@@ -1100,13 +1213,17 @@ export default function App() {
               <label className="layer-slider"><span>불투명도</span><input type="range" min="0" max="100" value={selectedLayer.opacity} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { opacity: Number(e.target.value) })} /><b>{selectedLayer.opacity}%</b></label>
               <label className="layer-slider"><span>가로 위치</span><input type="range" min={-sourceRef.current.width} max={sourceRef.current.width} value={selectedLayer.x} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { x: Number(e.target.value) })} /><b>{Math.round(selectedLayer.x)}</b></label>
               <label className="layer-slider"><span>세로 위치</span><input type="range" min={-sourceRef.current.height} max={sourceRef.current.height} value={selectedLayer.y} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { y: Number(e.target.value) })} /><b>{Math.round(selectedLayer.y)}</b></label>
-              <label className="layer-slider"><span>가로 크기</span><input type="range" min="5" max="500" value={selectedLayer.scaleX} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { scaleX: Number(e.target.value) })} /><b>{Math.round(selectedLayer.scaleX)}%</b></label>
-              <label className="layer-slider"><span>세로 크기</span><input type="range" min="5" max="500" value={selectedLayer.scaleY} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { scaleY: Number(e.target.value) })} /><b>{Math.round(selectedLayer.scaleY)}%</b></label>
+              <label className="layer-slider"><span>가로 크기</span><input type="range" min="5" max="500" value={Math.abs(selectedLayer.scaleX)} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { scaleX: Math.sign(selectedLayer.scaleX) * Number(e.target.value) })} /><b>{Math.round(Math.abs(selectedLayer.scaleX))}%</b></label>
+              <label className="layer-slider"><span>세로 크기</span><input type="range" min="5" max="500" value={Math.abs(selectedLayer.scaleY)} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { scaleY: Math.sign(selectedLayer.scaleY) * Number(e.target.value) })} /><b>{Math.round(Math.abs(selectedLayer.scaleY))}%</b></label>
               <label className="layer-slider"><span>회전</span><input type="range" min="-180" max="180" value={selectedLayer.rotation} onPointerDown={pushUndo} onChange={(e) => updateLayer(selectedLayer.id, { rotation: Number(e.target.value) })} /><b>{selectedLayer.rotation}°</b></label>
               <button className="layer-transform-reset" onClick={() => updateLayer(selectedLayer.id, { x: 0, y: 0, scaleX: 100, scaleY: 100, rotation: 0 }, true)}><RotateCcw size={12} /> 변형 초기화</button>
+              <div className="utility-presets layer-align"><button title="크기와 회전을 유지하고 가로 가운데 정렬" onClick={() => updateLayer(selectedLayer.id, { x: 0 }, true)}>가로 중앙</button><button title="크기와 회전을 유지하고 세로 가운데 정렬" onClick={() => updateLayer(selectedLayer.id, { y: 0 }, true)}>세로 중앙</button></div>
+              <div className="utility-presets layer-align"><button onClick={() => updateLayer(selectedLayer.id, { scaleX: -selectedLayer.scaleX }, true)}>좌우 반전</button><button onClick={() => updateLayer(selectedLayer.id, { scaleY: -selectedLayer.scaleY }, true)}>상하 반전</button></div>
+              </fieldset>
+              <button className="layer-transform-reset" onClick={() => { pushUndo(); setLayers(current => current.map(layer => ({ ...layer, visible: layer.id === selectedLayer.id }))); }}>다른 추가 레이어 숨기기 (배경 유지)</button>
             </div>}
             <div className="layer-create-actions"><button disabled={!loaded} onClick={() => void importImageLayer()}><Upload size={14} /> 이미지 레이어</button><button disabled={!loaded} onClick={addLayer}><Plus size={14} /> 빈 레이어</button></div>
-            <div className="layer-actions"><button disabled={!selectedLayer || layers.indexOf(selectedLayer) === layers.length - 1} onClick={() => moveLayerOrder("up")} title="앞으로"><ChevronUp size={14} /></button><button disabled={!selectedLayer || layers.indexOf(selectedLayer) === 0} onClick={() => moveLayerOrder("down")} title="뒤로"><ChevronDown size={14} /></button><button disabled={!selectedLayer} onClick={duplicateLayer} title="레이어 복제"><Copy size={14} /></button><button disabled={!selectedLayer} onClick={deleteLayer} title="레이어 삭제"><Trash2 size={14} /></button></div>
+            <div className="layer-actions"><button disabled={!selectedLayer || selectedLayer.locked || layers.indexOf(selectedLayer) === layers.length - 1} onClick={() => moveLayerOrder("up")} title="앞으로"><ChevronUp size={14} /></button><button disabled={!selectedLayer || selectedLayer.locked || layers.indexOf(selectedLayer) === 0} onClick={() => moveLayerOrder("down")} title="뒤로"><ChevronDown size={14} /></button><button disabled={!loaded} onClick={duplicateLayer} title={selectedLayer ? "레이어 복제" : "배경을 새 레이어로 복제"}><Copy size={14} /></button><button disabled={!selectedLayer || selectedLayer.locked} onClick={deleteLayer} title="레이어 삭제"><Trash2 size={14} /></button></div>
           </div>}
         </aside>
       </section>
@@ -1117,11 +1234,17 @@ export default function App() {
       <input ref={projectFileInputRef} hidden type="file" accept=".hinanaphoto" onChange={(e) => { const file = e.target.files?.[0]; if (file) void file.text().then((raw) => restoreProject(raw, file.name)).catch((error) => setStatus(error instanceof Error ? error.message : "프로젝트를 열 수 없습니다.")); e.currentTarget.value = ""; }} />
 
       {saving && <div className="dialog-overlay"><div className="export-dialog" role="status" style={{ padding: 32 }}>프로젝트를 안전하게 저장하고 있습니다…</div></div>}
-      {showExport && <div className="dialog-overlay" onMouseDown={() => setShowExport(false)}><div className="export-dialog" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="dialog-heading"><div><Download size={19} /><span><strong>이미지 내보내기</strong><small>편집 결과를 새 파일로 저장합니다.</small></span></div><button onClick={() => setShowExport(false)}>×</button></div>
+      {showNew && <NewCanvasDialog onClose={() => setShowNew(false)} onCreate={createCanvas} />}
+      {showHelp && <div className="dialog-overlay" onMouseDown={() => setShowHelp(false)}><section className="utility-dialog" role="dialog" aria-modal="true" aria-labelledby="shortcut-title" onMouseDown={e => e.stopPropagation()}><h2 id="shortcut-title">빠르게 편집하기</h2><p>Windows는 Ctrl, macOS는 ⌘를 사용하세요.</p><dl className="shortcut-list">{[
+        ["새 캔버스", "Ctrl / ⌘ + N"], ["이미지 열기", "Ctrl / ⌘ + O"], ["이미지 레이어 추가", "Ctrl / ⌘ + Shift + O"], ["프로젝트 열기", "Ctrl / ⌘ + Alt + O"], ["저장 / 다른 이름으로", "Ctrl / ⌘ + S / Shift + S"], ["이미지 내보내기", "Ctrl / ⌘ + E"], ["실행 취소 / 다시 실행", "Ctrl / ⌘ + Z / Shift + Z"], ["이동 / 손 / 자르기", "V / H / C"], ["브러시 / 지우개 / 스포이드", "B / E / I"], ["텍스트 / 모자이크", "T / M"], ["브러시·지우개 크기", "[ / ]"], ["선택 레이어 복제", "Ctrl / ⌘ + D"], ["레이어 미세 이동 (이동 도구)", "방향키 · Shift로 10px"], ["자르기 적용 / 취소", "Enter / Esc"], ["선택 레이어 삭제", "Delete"],
+      ].map(([label, key]) => <div key={label}><dt>{label}</dt><dd>{key}</dd></div>)}</dl><div className="utility-actions"><button autoFocus className="primary" onClick={() => setShowHelp(false)}>확인</button></div></section></div>}
+      {showExport && <div className="dialog-overlay" onMouseDown={() => { if (!exporting) setShowExport(false); }}><div className="export-dialog" role="dialog" aria-modal="true" aria-label="이미지 내보내기" aria-busy={exporting} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="dialog-heading"><div><Download size={19} /><span><strong>이미지 내보내기</strong><small>편집 결과를 새 파일로 저장합니다.</small></span></div><button disabled={exporting} onClick={() => setShowExport(false)}>×</button></div>
         <div className="dialog-body"><label>파일 형식</label><div className="format-options"><button className={exportFormat === "png" ? "selected" : ""} onClick={() => setExportFormat("png")}><strong>PNG</strong><span>무손실 · 최상의 품질</span></button><button className={exportFormat === "jpeg" ? "selected" : ""} onClick={() => setExportFormat("jpeg")}><strong>JPEG</strong><span>작은 용량 · 사진에 적합</span></button></div><div className="export-summary"><span>출력 크기</span><strong>{sourceRef.current.width} × {sourceRef.current.height}px</strong></div></div>
         {exportFormat === "jpeg" && <label className="quality-control">JPEG 품질 · {exportQuality}%<input type="range" min="10" max="100" value={exportQuality} onChange={e => setExportQuality(Number(e.target.value))} /><small>투명한 영역은 흰색으로 저장됩니다.</small></label>}
-        <div className="dialog-actions"><button onClick={() => setShowExport(false)}>취소</button><button className="primary" onClick={() => void exportImage()}><Download size={14} /> 내보내기</button></div>
+        <label className="quality-control">출력 배율<select disabled={exporting} value={exportScale} onChange={e => setExportScale(Number(e.target.value))}>{[25,50,75,100,150,200].map(scale => <option value={scale} key={scale}>{scale}%{scale === 100 ? " · 원본 크기" : ""}</option>)}</select><small>저장 크기: {Math.max(1, Math.round(sourceRef.current.width * exportScale / 100))} × {Math.max(1, Math.round(sourceRef.current.height * exportScale / 100))}px · 프로젝트 크기는 유지됩니다.</small></label>
+        {exportError && <p className="export-error" role="alert">{exportError}</p>}
+        <div className="dialog-actions"><button disabled={exporting} onClick={() => setShowExport(false)}>취소</button><button disabled={exporting} className="primary" onClick={() => void exportImage()}><Download size={14} />{exporting ? "내보내는 중…" : "내보내기"}</button></div>
       </div></div>}
 
       {showAbout && <div className="about-overlay" onMouseDown={() => setShowAbout(false)}><section className="about-dialog" onMouseDown={(e) => e.stopPropagation()}>

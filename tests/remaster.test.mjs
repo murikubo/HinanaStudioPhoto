@@ -31,6 +31,17 @@ test('rejects malformed projects, duplicated IDs and invalid transforms', () => 
     const p = project(); mutate(p); assert.throws(() => validateProject(JSON.stringify(p)));
   }
 });
+test('new layer settings validate while legacy projects remain compatible', () => {
+  assert.doesNotThrow(() => validateProject(JSON.stringify(project())));
+  for (const mode of ['source-over','multiply','screen','overlay','darken','lighten','difference']) {
+    const p = project(); p.snapshot.layers[0].blendMode = mode; p.snapshot.layers[0].locked = true;
+    assert.doesNotThrow(() => validateProject(JSON.stringify(p)));
+  }
+  for (const patch of [{locked: 'yes'}, {blendMode: 'invalid'}]) {
+    const p = project(); Object.assign(p.snapshot.layers[0], patch);
+    assert.throws(() => validateProject(JSON.stringify(p)));
+  }
+});
 test('portable gzip and legacy JSON round-trip; safe overwrite retains previous file on validation failure', async () => {
   const dir = await mkdtemp(path.join(tmpdir(), 'hinanaphoto-test-'));
   const target = path.join(dir, '한글 프로젝트.hinanaphoto');
@@ -40,6 +51,8 @@ test('portable gzip and legacy JSON round-trip; safe overwrite retains previous 
     assert.equal((await readFile(target))[0], 0x1f);
     assert.equal(await readProject(target), first);
     const changed = project(); changed.snapshot.layers[0].text = '다른 PC에서도 그대로';
+    changed.snapshot.layers[0].locked = true;
+    changed.snapshot.layers[0].blendMode = 'multiply';
     const second = JSON.stringify(changed);
     await writeProject(target, second);
     assert.equal(await readProject(target), second);

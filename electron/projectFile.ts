@@ -16,6 +16,8 @@ export function validateProject(data: string) {
     for (const key of ["x", "y", "rotation", "opacity"]) if (!Number.isFinite(layer[key])) throw new Error("잘못된 레이어 변형값입니다.");
     for (const key of ["scaleX", "scaleY", "scale"]) if (layer[key] !== undefined && (!Number.isFinite(layer[key]) || layer[key] === 0)) throw new Error("잘못된 레이어 크기입니다.");
     if (layer.opacity < 0 || layer.opacity > 100 || typeof layer.visible !== "boolean") throw new Error("잘못된 레이어 표시값입니다.");
+    if (layer.locked !== undefined && typeof layer.locked !== "boolean") throw new Error("잘못된 레이어 잠금값입니다.");
+    if (layer.blendMode !== undefined && !["source-over", "multiply", "screen", "overlay", "darken", "lighten", "difference"].includes(layer.blendMode)) throw new Error("지원하지 않는 혼합 모드입니다.");
   }
   if (!p.snapshot.adjustments || Object.values(p.snapshot.adjustments).some(v => typeof v !== "number" || !Number.isFinite(v))) throw new Error("잘못된 색상 조정값입니다.");
   for (const key of ["brightness", "contrast", "saturation", "temperature", "hue"]) if (!Number.isFinite(p.snapshot.adjustments[key])) throw new Error("색상 조정값이 누락되었습니다.");
